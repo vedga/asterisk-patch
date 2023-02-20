@@ -1,0 +1,1656 @@
+diff --git a/funcs/func_curl.c b/funcs/func_curl.c
+index c51d273..04eb2d7 100644
+--- a/funcs/func_curl.c
++++ b/funcs/func_curl.c
+@@ -753,6 +753,9 @@ static int acf_curl_helper(struct ast_channel *chan, struct curl_args *args)
+ 
+ 	if (curl_easy_perform(*curl) != 0) {
+ 		ast_log(LOG_WARNING, "%s ('%s')\n", curl_errbuf, args->url);
++
++        /* Any connection trouble cause request is not successful */
++        ret = -1;
+ 	}
+ 
+ 	/* Reset buffer to NULL so curl doesn't try to write to it when the
+diff --git a/include/asterisk/config.h b/include/asterisk/config.h
+index 44ba4e4..1281957 100644
+--- a/include/asterisk/config.h
++++ b/include/asterisk/config.h
+@@ -108,7 +108,9 @@ struct ast_variable {
+ 
+ typedef struct ast_config *config_load_func(const char *database, const char *table, const char *configfile, struct ast_config *config, struct ast_flags flags, const char *suggested_include_file, const char *who_asked);
+ typedef struct ast_variable *realtime_var_get(const char *database, const char *table, const struct ast_variable *fields);
++typedef struct ast_variable *realtime_var_get2(const char *database, const char *table, const struct ast_variable *fields, int * const errflag);
+ typedef struct ast_config *realtime_multi_get(const char *database, const char *table, const struct ast_variable *fields);
++typedef struct ast_config *realtime_multi_get2(const char *database, const char *table, const struct ast_variable *fields, int * const errflag);
+ typedef int realtime_update(const char *database, const char *table, const char *keyfield, const char *entity, const struct ast_variable *fields);
+ typedef int realtime_update2(const char *database, const char *table, const struct ast_variable *lookup_fields, const struct ast_variable *update_fields);
+ typedef int realtime_store(const char *database, const char *table, const struct ast_variable *fields);
+@@ -131,7 +133,9 @@ struct ast_config_engine {
+ 	char *name;
+ 	config_load_func *load_func;
+ 	realtime_var_get *realtime_func;
++    realtime_var_get2 *realtime_func2;
+ 	realtime_multi_get *realtime_multi_func;
++    realtime_multi_get2 *realtime_multi_func2;
+ 	realtime_update *update_func;
+ 	realtime_update2 *update2_func;
+ 	realtime_store *store_func;
+@@ -441,6 +445,7 @@ int ast_category_exist(const struct ast_config *config, const char *category_nam
+  *
+  * \param family which family/config to lookup
+  * \param fields which fields to lookup
++ * \param errflag place for backend error status if any
+  *
+  * \details
+  * This will use builtin configuration backends to look up a particular
+@@ -458,8 +463,10 @@ int ast_category_exist(const struct ast_config *config, const char *category_nam
+  * You should use the constant SENTINEL to terminate arguments, in
+  * order to preserve cross-platform compatibility.
+  */
++struct ast_variable *ast_load_realtime_fields2(const char *family, const struct ast_variable *fields, int * const errflag);
+ struct ast_variable *ast_load_realtime_fields(const char *family, const struct ast_variable *fields);
+ struct ast_variable *ast_load_realtime(const char *family, ...) attribute_sentinel;
++struct ast_variable *ast_load_realtime_all_fields2(const char *family, const struct ast_variable *fields, int * const errflag);
+ struct ast_variable *ast_load_realtime_all_fields(const char *family, const struct ast_variable *fields);
+ struct ast_variable *ast_load_realtime_all(const char *family, ...) attribute_sentinel;
+ 
+@@ -525,6 +532,25 @@ int ast_unload_realtime(const char *family);
+  */
+ int ast_realtime_require_field(const char *family, ...) attribute_sentinel;
+ 
++/*!
++ * \brief Retrieve realtime configuration
++ *
++ * \param family which family/config to lookup
++ * \param fields list of fields
++ * \param errflag optional place for error code from realtime backend
++ *
++ * \details
++ * This will use builtin configuration backends to look up a particular
++ * entity in realtime and return a variable list of its parameters. Unlike
++ * the ast_load_realtime, this function can return more than one entry and
++ * is thus stored inside a traditional ast_config structure rather than
++ * just returning a linked list of variables.
++ *
++ * \return An ast_config with one or more results
++ * \retval NULL Error or no results returned
++ */
++struct ast_config *ast_load_realtime_multientry_fields2(const char *family, const struct ast_variable *fields, int * const errflag);
++
+ /*!
+  * \brief Retrieve realtime configuration
+  *
+diff --git a/include/asterisk/pbx.h b/include/asterisk/pbx.h
+index 593b186..4d4cc52 100644
+--- a/include/asterisk/pbx.h
++++ b/include/asterisk/pbx.h
+@@ -1425,14 +1425,14 @@ int pbx_builtin_raise_exception(struct ast_channel *chan, const char *data);
+ 
+ /*! @name Substitution routines, using static string buffers
+  * @{ */
+-void pbx_substitute_variables_helper(struct ast_channel *c, const char *cp1, char *cp2, int count);
+-void pbx_substitute_variables_varshead(struct varshead *headp, const char *cp1, char *cp2, int count);
+-void pbx_substitute_variables_helper_full(struct ast_channel *c, struct varshead *headp, const char *cp1, char *cp2, int cp2_size, size_t *used);
++int pbx_substitute_variables_helper(struct ast_channel *c, const char *cp1, char *cp2, int count);
++int pbx_substitute_variables_varshead(struct varshead *headp, const char *cp1, char *cp2, int count);
++int pbx_substitute_variables_helper_full(struct ast_channel *c, struct varshead *headp, const char *cp1, char *cp2, int cp2_size, size_t *used);
+ 
+ /*!
+  * \brief Substitutes variables, similar to pbx_substitute_variables_helper_full, but allows passing the context, extension, and priority in.
+  */
+-void pbx_substitute_variables_helper_full_location(struct ast_channel *c, struct varshead *headp, const char *cp1, char *cp2, int cp2_size, size_t *used, const char *context, const char *exten, int pri);
++int pbx_substitute_variables_helper_full_location(struct ast_channel *c, struct varshead *headp, const char *cp1, char *cp2, int cp2_size, size_t *used, const char *context, const char *exten, int pri);
+ /*! @} */
+ 
+ /*! @name Substitution routines, using dynamic string buffers
+@@ -1453,7 +1453,7 @@ const char *ast_str_retrieve_variable(struct ast_str **buf, ssize_t maxlen, stru
+  * \param chan Channel variables from which to extract values, and channel to pass to any dialplan functions.
+  * \param templ Variable template to expand.
+  */
+-void ast_str_substitute_variables(struct ast_str **buf, ssize_t maxlen, struct ast_channel *chan, const char *templ);
++int ast_str_substitute_variables(struct ast_str **buf, ssize_t maxlen, struct ast_channel *chan, const char *templ);
+ 
+ /*!
+  * \param buf Result will be placed in this buffer.
+@@ -1461,7 +1461,7 @@ void ast_str_substitute_variables(struct ast_str **buf, ssize_t maxlen, struct a
+  * \param headp If no channel is specified, a channel list from which to extract variable values
+  * \param templ Variable template to expand.
+  */
+-void ast_str_substitute_variables_varshead(struct ast_str **buf, ssize_t maxlen, struct varshead *headp, const char *templ);
++int ast_str_substitute_variables_varshead(struct ast_str **buf, ssize_t maxlen, struct varshead *headp, const char *templ);
+ 
+ /*!
+  * \param buf Result will be placed in this buffer.
+@@ -1470,8 +1470,9 @@ void ast_str_substitute_variables_varshead(struct ast_str **buf, ssize_t maxlen,
+  * \param headp If no channel is specified, a channel list from which to extract variable values
+  * \param templ Variable template to expand.
+  * \param used Number of bytes read from the template.  (May be NULL)
++ * \retval 0 if no errors, else some error occurred
+  */
+-void ast_str_substitute_variables_full(struct ast_str **buf, ssize_t maxlen, struct ast_channel *c, struct varshead *headp, const char *templ, size_t *used);
++int ast_str_substitute_variables_full(struct ast_str **buf, ssize_t maxlen, struct ast_channel *c, struct varshead *headp, const char *templ, size_t *used);
+ 
+ /*!
+  * \brief Perform variable/function/expression substitution on an ast_str
+@@ -1489,8 +1490,9 @@ void ast_str_substitute_variables_full(struct ast_str **buf, ssize_t maxlen, str
+  *                 If this parameter is set to 1 and both a channel and headp
+  *                 are specified, the channel will be searched for variables
+  *                 first and any not found will be searched for in headp.
++ * \retval 0 if no errors, else some error occurred
+  */
+-void ast_str_substitute_variables_full2(struct ast_str **buf, ssize_t maxlen,
++int ast_str_substitute_variables_full2(struct ast_str **buf, ssize_t maxlen,
+ 	struct ast_channel *c, struct varshead *headp, const char *templ,
+ 	size_t *used, int use_both);
+ 
+diff --git a/include/asterisk/res_prometheus.h b/include/asterisk/res_prometheus.h
+index 2c64437..5823d14 100644
+--- a/include/asterisk/res_prometheus.h
++++ b/include/asterisk/res_prometheus.h
+@@ -32,6 +32,7 @@
+ #include "asterisk/lock.h"
+ #include "asterisk/linkedlists.h"
+ #include "asterisk/stringfields.h"
++#include "asterisk/optional_api.h"
+ 
+ /*!
+  * \brief How many labels a single metric can have
+@@ -231,6 +232,14 @@ struct prometheus_metric {
+ 	 * callback function. Otherwise, leave it \c NULL.
+ 	 */
+ 	void (* get_metric_value)(struct prometheus_metric *metric);
++    /*!
++     * \brief Callback function called before metric being destroyed by res_prometheus module
++     *
++     * \retval 0 metric can be fully destroyed by res_prometheus module
++     * \retval -1 metric well be destroyed by producer module
++     *
++     */
++    int (* on_destroy)(struct prometheus_metric *metric);
+ 	/*!
+ 	 * \brief A list of children metrics
+ 	 *
+@@ -286,6 +295,7 @@ struct prometheus_metric {
+ 	.help = (h), \
+ 	.children = AST_LIST_HEAD_NOLOCK_INIT_VALUE, \
+ 	.get_metric_value = (cb), \
++    .on_destroy = NULL, \
+ }
+ 
+ /*!
+@@ -323,8 +333,11 @@ struct prometheus_metric {
+  * \c children list first.
+  *
+  * \param metric The metric to destroy
++ * \retval 0 if no errors, else some error occurred
+  */
+-void prometheus_metric_free(struct prometheus_metric *metric);
++AST_OPTIONAL_API(int, prometheus_metric_free,
++                 (struct prometheus_metric *metric),
++                { return AST_OPTIONAL_API_UNAVAILABLE; });
+ 
+ /*!
+  * \brief Create a malloc'd counter metric
+@@ -420,7 +433,9 @@ struct prometheus_callback {
+  * \retval 0 success
+  * \retval -1 error
+  */
+-int prometheus_metric_register(struct prometheus_metric *metric);
++AST_OPTIONAL_API(int, prometheus_metric_register,
++                 (struct prometheus_metric *metric),
++                { return AST_OPTIONAL_API_UNAVAILABLE; });
+ 
+ /*!
+  * \brief Remove a registered metric
+@@ -432,7 +447,9 @@ int prometheus_metric_register(struct prometheus_metric *metric);
+  * \retval 0 The metric was found, unregistered, and disposed of
+  * \retval -1 The metric was not found
+  */
+-int prometheus_metric_unregister(struct prometheus_metric *metric);
++AST_OPTIONAL_API(int, prometheus_metric_unregister,
++                 (struct prometheus_metric *metric),
++                { return AST_OPTIONAL_API_UNAVAILABLE; });
+ 
+ /*!
+  * The current number of registered metrics
+diff --git a/include/asterisk/sorcery.h b/include/asterisk/sorcery.h
+index 8f7e2b2..afd56ee 100644
+--- a/include/asterisk/sorcery.h
++++ b/include/asterisk/sorcery.h
+@@ -292,27 +292,48 @@ struct ast_sorcery_wizard {
+ 	/*! \brief Callback for creating an object */
+ 	int (*create)(const struct ast_sorcery *sorcery, void *data, void *object);
+ 
+-	/*! \brief Callback for retrieving an object using an id */
++    /*! \brief Callback for retrieving an object using an id, return backend error if any */
++    void *(*retrieve_id2)(const struct ast_sorcery *sorcery, void *data, const char *type, const char *id, int * const errflag);
++
++    /*! \brief Callback for retrieving an object using an id */
+ 	void *(*retrieve_id)(const struct ast_sorcery *sorcery, void *data, const char *type, const char *id);
+ 
+-	/*! \brief Callback for retrieving multiple objects using a regex on their id */
+-	void (*retrieve_regex)(const struct ast_sorcery *sorcery, void *data, const char *type, struct ao2_container *objects, const char *regex);
++	/*! \brief Callback for retrieving multiple objects using a regex on their id, return backend error if any */
++	void (*retrieve_regex2)(const struct ast_sorcery *sorcery, void *data, const char *type, struct ao2_container *objects, const char *regex, int * const errflag);
++
++    /*! \brief Callback for retrieving multiple objects using a regex on their id */
++    void (*retrieve_regex)(const struct ast_sorcery *sorcery, void *data, const char *type, struct ao2_container *objects, const char *regex);
+ 
+-	/*! \brief Optional callback for retrieving multiple objects by matching their id with a prefix */
+-	void (*retrieve_prefix)(const struct ast_sorcery *sorcery,
++    /*! \brief Optional callback for retrieving multiple objects by matching their id with a prefix, return backend error if any */
++	void (*retrieve_prefix2)(const struct ast_sorcery *sorcery,
+ 			void *data,
+ 			const char *type,
+ 			struct ao2_container *objects,
+ 			const char *prefix,
+-			const size_t prefix_len);
++			const size_t prefix_len,
++            int * const errflag);
++
++    /*! \brief Optional callback for retrieving multiple objects by matching their id with a prefix */
++    void (*retrieve_prefix)(const struct ast_sorcery *sorcery,
++                            void *data,
++                            const char *type,
++                            struct ao2_container *objects,
++                            const char *prefix,
++                            const size_t prefix_len);
+ 
+-	/*! \brief Optional callback for retrieving an object using fields */
+-	void *(*retrieve_fields)(const struct ast_sorcery *sorcery, void *data, const char *type, const struct ast_variable *fields);
++    /*! \brief Optional callback for retrieving an object using fields, return backend error if any */
++	void *(*retrieve_fields2)(const struct ast_sorcery *sorcery, void *data, const char *type, const struct ast_variable *fields, int * const errflag);
+ 
+-	/*! \brief Optional callback for retrieving multiple objects using some optional field criteria */
+-	void (*retrieve_multiple)(const struct ast_sorcery *sorcery, void *data, const char *type, struct ao2_container *objects, const struct ast_variable *fields);
++    /*! \brief Optional callback for retrieving an object using fields */
++    void *(*retrieve_fields)(const struct ast_sorcery *sorcery, void *data, const char *type, const struct ast_variable *fields);
+ 
+-	/*! \brief Callback for updating an object */
++    /*! \brief Optional callback for retrieving multiple objects using some optional field criteria, return backend error if any */
++	void (*retrieve_multiple2)(const struct ast_sorcery *sorcery, void *data, const char *type, struct ao2_container *objects, const struct ast_variable *fields, int * const errflag);
++
++    /*! \brief Optional callback for retrieving multiple objects using some optional field criteria */
++    void (*retrieve_multiple)(const struct ast_sorcery *sorcery, void *data, const char *type, struct ao2_container *objects, const struct ast_variable *fields);
++
++    /*! \brief Callback for updating an object */
+ 	int (*update)(const struct ast_sorcery *sorcery, void *data, void *object);
+ 
+ 	/*! \brief Callback for deleting an object */
+@@ -1367,6 +1388,19 @@ void ast_sorcery_observer_remove(const struct ast_sorcery *sorcery, const char *
+  */
+ int ast_sorcery_create(const struct ast_sorcery *sorcery, void *object);
+ 
++/*!
++ * \brief Retrieve an object using its unique identifier
++ *
++ * \param sorcery Pointer to a sorcery structure
++ * \param type Type of object to retrieve
++ * \param id Unique object identifier
++ * \param errflag Place for receive backend error if any
++ *
++ * \retval non-NULL if found
++ * \retval NULL if not found
++ */
++void *ast_sorcery_retrieve_by_id2(const struct ast_sorcery *sorcery, const char *type, const char *id, int * const errflag);
++
+ /*!
+  * \brief Retrieve an object using its unique identifier
+  *
+@@ -1379,6 +1413,50 @@ int ast_sorcery_create(const struct ast_sorcery *sorcery, void *object);
+  */
+ void *ast_sorcery_retrieve_by_id(const struct ast_sorcery *sorcery, const char *type, const char *id);
+ 
++/*!
++ * \brief Retrieve an object or multiple objects using specific fields
++ * \since 13.9.0
++ *
++ * \param sorcery Pointer to a sorcery structure
++ * \param type Type of object to retrieve
++ * \param flags Flags to control behavior
++ * \param fields Optional object fields and values to match against
++ * \param errflag Optional placeholder for backend error status if any
++ *
++ * \retval non-NULL if found
++ * \retval NULL if not found
++ *
++ * \note If the AST_RETRIEVE_FLAG_MULTIPLE flag is specified the returned value will be an
++ *       ao2_container that must be unreferenced after use.
++ *
++ * \note If the AST_RETRIEVE_FLAG_ALL flag is used you may omit fields to retrieve all objects
++ *       of the given type.
++ *
++ * \note The fields parameter can contain realtime-style expressions in variable->name.
++ *       All operators defined for ast_strings_match can be used except for regex as
++ *       there's no common support for regex in the realtime backends at this time.
++ *       If multiple variables are in the fields list, all must match for an object to
++ *       be returned.  See ast_strings_match for more information.
++ *
++ * Example:
++ *
++ * The following code can be significantly faster when a realtime backend is in use
++ * because the expression "qualify_frequency > 0" is passed to the database to limit
++ * the number of rows returned.
++ *
++ *  struct ast_variable *var = ast_variable_new("qualify_frequency >", "0", "");
++ *  struct ao2_container *aors;
++ *
++ *  if (!var) {
++ *  	return;
++ *  }
++ *
++ *  aors = ast_sorcery_retrieve_by_fields(ast_sip_get_sorcery(),
++ *      "aor", AST_RETRIEVE_FLAG_MULTIPLE, var);
++ *
++ */
++void *ast_sorcery_retrieve_by_fields2(const struct ast_sorcery *sorcery, const char *type, unsigned int flags, struct ast_variable *fields, int * const errflag);
++
+ /*!
+  * \brief Retrieve an object or multiple objects using specific fields
+  * \since 13.9.0
+@@ -1422,6 +1500,21 @@ void *ast_sorcery_retrieve_by_id(const struct ast_sorcery *sorcery, const char *
+  */
+ void *ast_sorcery_retrieve_by_fields(const struct ast_sorcery *sorcery, const char *type, unsigned int flags, struct ast_variable *fields);
+ 
++/*!
++ * \brief Retrieve multiple objects using a regular expression on their id
++ *
++ * \param sorcery Pointer to a sorcery structure
++ * \param type Type of object to retrieve
++ * \param regex Regular expression
++ * \param errflag Optional parameter for receive error status from backend
++ *
++ * \retval non-NULL if error occurs
++ * \retval NULL success
++ *
++ * \note The provided regex is treated as extended case sensitive.
++ */
++struct ao2_container *ast_sorcery_retrieve_by_regex2(const struct ast_sorcery *sorcery, const char *type, const char *regex, int * const errflag);
++
+ /*!
+  * \brief Retrieve multiple objects using a regular expression on their id
+  *
+@@ -1436,6 +1529,23 @@ void *ast_sorcery_retrieve_by_fields(const struct ast_sorcery *sorcery, const ch
+  */
+ struct ao2_container *ast_sorcery_retrieve_by_regex(const struct ast_sorcery *sorcery, const char *type, const char *regex);
+ 
++/*!
++ * \brief Retrieve multiple objects whose id begins with the specified prefix
++ * \since 13.19.0
++ *
++ * \param sorcery Pointer to a sorcery structure
++ * \param type Type of object to retrieve
++ * \param prefix Object id prefix
++ * \param prefix_len The length of prefix in bytes
++ * \param errflag Optional placeholder to receive error from backend if any
++ *
++ * \retval non-NULL if error occurs
++ * \retval NULL success
++ *
++ * \note The prefix is matched in a case sensitive manner.
++ */
++struct ao2_container *ast_sorcery_retrieve_by_prefix2(const struct ast_sorcery *sorcery, const char *type, const char *prefix, const size_t prefix_len, int * const errflag);
++
+ /*!
+  * \brief Retrieve multiple objects whose id begins with the specified prefix
+  * \since 13.19.0
+diff --git a/main/config.c b/main/config.c
+index 1074407..13865ed 100644
+--- a/main/config.c
++++ b/main/config.c
+@@ -3344,7 +3344,7 @@ static int realtime_arguments_to_fields2(va_list ap, int skip, struct ast_variab
+ 	return 0;
+ }
+ 
+-struct ast_variable *ast_load_realtime_all_fields(const char *family, const struct ast_variable *fields)
++struct ast_variable *ast_load_realtime_all_fields2(const char *family, const struct ast_variable *fields, int * const errflag)
+ {
+ 	struct ast_config_engine *eng;
+ 	char db[256];
+@@ -3352,11 +3352,22 @@ struct ast_variable *ast_load_realtime_all_fields(const char *family, const stru
+ 	struct ast_variable *res=NULL;
+ 	int i;
+ 
++    if (errflag) {
++        *errflag = 0;
++    }
++
+ 	for (i = 1; ; i++) {
+ 		if ((eng = find_engine(family, i, db, sizeof(db), table, sizeof(table)))) {
+-			if (eng->realtime_func && (res = eng->realtime_func(db, table, fields))) {
+-				return res;
+-			}
++            if (eng->realtime_func2) {
++                if ((res = eng->realtime_func2(db, table, fields, errflag))) {
++                    return res;
++                }
++            } else if (eng->realtime_func) {
++                if ((res = eng->realtime_func(db, table, fields))) {
++                    return res;
++                }
++
++            }
+ 		} else {
+ 			return NULL;
+ 		}
+@@ -3365,6 +3376,11 @@ struct ast_variable *ast_load_realtime_all_fields(const char *family, const stru
+ 	return res;
+ }
+ 
++struct ast_variable *ast_load_realtime_all_fields(const char *family, const struct ast_variable *fields)
++{
++    return ast_load_realtime_all_fields2(family, fields, NULL);
++}
++
+ struct ast_variable *ast_load_realtime_all(const char *family, ...)
+ {
+ 	RAII_VAR(struct ast_variable *, fields, NULL, ast_variables_destroy);
+@@ -3382,13 +3398,13 @@ struct ast_variable *ast_load_realtime_all(const char *family, ...)
+ 	return res;
+ }
+ 
+-struct ast_variable *ast_load_realtime_fields(const char *family, const struct ast_variable *fields)
++struct ast_variable *ast_load_realtime_fields2(const char *family, const struct ast_variable *fields, int * const errflag)
+ {
+ 	struct ast_variable *res;
+ 	struct ast_variable *cur;
+ 	struct ast_variable **prev;
+ 
+-	res = ast_load_realtime_all_fields(family, fields);
++	res = ast_load_realtime_all_fields2(family, fields, errflag);
+ 
+ 	/* Filter the list. */
+ 	prev = &res;
+@@ -3417,6 +3433,11 @@ struct ast_variable *ast_load_realtime_fields(const char *family, const struct a
+ 	return res;
+ }
+ 
++struct ast_variable *ast_load_realtime_fields(const char *family, const struct ast_variable *fields)
++{
++    return ast_load_realtime_fields2(family, fields, NULL);
++}
++
+ struct ast_variable *ast_load_realtime(const char *family, ...)
+ {
+ 	RAII_VAR(struct ast_variable *, fields, NULL, ast_variables_destroy);
+@@ -3507,7 +3528,7 @@ int ast_unload_realtime(const char *family)
+ 	return res;
+ }
+ 
+-struct ast_config *ast_load_realtime_multientry_fields(const char *family, const struct ast_variable *fields)
++struct ast_config *ast_load_realtime_multientry_fields2(const char *family, const struct ast_variable *fields, int * const errflag)
+ {
+ 	struct ast_config_engine *eng;
+ 	char db[256];
+@@ -3515,8 +3536,23 @@ struct ast_config *ast_load_realtime_multientry_fields(const char *family, const
+ 	struct ast_config *res = NULL;
+ 	int i;
+ 
++    if (errflag) {
++        *errflag = 0;
++    }
++
+ 	for (i = 1; ; i++) {
+ 		if ((eng = find_engine(family, i, db, sizeof(db), table, sizeof(table)))) {
++            if (eng->realtime_multi_func2) {
++                if ((res = eng->realtime_multi_func2(db, table, fields, errflag))) {
++                    break;
++                }
++            } else if (eng->realtime_multi_func) {
++                if ((res = eng->realtime_multi_func(db, table, fields))) {
++                    break;
++                }
++
++            }
++
+ 			if (eng->realtime_multi_func && (res = eng->realtime_multi_func(db, table, fields))) {
+ 				/* If we were returned an empty cfg, destroy it and return NULL */
+ 				if (!res->root) {
+@@ -3530,9 +3566,20 @@ struct ast_config *ast_load_realtime_multientry_fields(const char *family, const
+ 		}
+ 	}
+ 
++    if (res && !res->root) {
++        ast_config_destroy(res);
++        res = NULL;
++    }
++
+ 	return res;
+ }
+ 
++struct ast_config *ast_load_realtime_multientry_fields(const char *family, const struct ast_variable *fields)
++{
++    return ast_load_realtime_multientry_fields2(family, fields, NULL);
++}
++
++
+ struct ast_config *ast_load_realtime_multientry(const char *family, ...)
+ {
+ 	RAII_VAR(struct ast_variable *, fields, NULL, ast_variables_destroy);
+diff --git a/main/pbx_variables.c b/main/pbx_variables.c
+index b05a9d1..52ac539 100644
+--- a/main/pbx_variables.c
++++ b/main/pbx_variables.c
+@@ -397,7 +397,7 @@ const char *ast_str_retrieve_variable(struct ast_str **str, ssize_t maxlen, stru
+ 	return ret;
+ }
+ 
+-void ast_str_substitute_variables_full2(struct ast_str **buf, ssize_t maxlen,
++int ast_str_substitute_variables_full2(struct ast_str **buf, ssize_t maxlen,
+ 	struct ast_channel *c, struct varshead *headp, const char *templ,
+ 	size_t *used, int use_both)
+ {
+@@ -406,6 +406,7 @@ void ast_str_substitute_variables_full2(struct ast_str **buf, ssize_t maxlen,
+ 	struct ast_str *substr1 = ast_str_create(16);
+ 	struct ast_str *substr2 = NULL;
+ 	struct ast_str *substr3 = ast_str_create(16);
++    int error = 0;
+ 
+ 	ast_str_reset(*buf);
+ 
+@@ -415,7 +416,7 @@ void ast_str_substitute_variables_full2(struct ast_str **buf, ssize_t maxlen,
+ 		}
+ 		ast_free(substr1);
+ 		ast_free(substr3);
+-		return;
++		return -1;
+ 	}
+ 
+ 	whereweare = templ;
+@@ -517,7 +518,7 @@ void ast_str_substitute_variables_full2(struct ast_str **buf, ssize_t maxlen,
+ 						continue;
+ 					}
+ 				}
+-				ast_str_substitute_variables_full2(&substr2, 0, c, headp,
++				error |= ast_str_substitute_variables_full2(&substr2, 0, c, headp,
+ 					ast_str_buffer(substr1), NULL, use_both);
+ 				finalvars = ast_str_buffer(substr2);
+ 			} else {
+@@ -570,7 +571,9 @@ void ast_str_substitute_variables_full2(struct ast_str **buf, ssize_t maxlen,
+ 				}
+ 				res = (result ? 0 : -1);
+ 			}
+-			if (!res) {
++			if (res) {
++                error |= res;
++            } else {
+ 				ast_str_substring(substr3, offset, offset2);
+ 				ast_str_append(buf, maxlen, "%s", ast_str_buffer(substr3));
+ 			}
+@@ -620,7 +623,7 @@ void ast_str_substitute_variables_full2(struct ast_str **buf, ssize_t maxlen,
+ 						continue;
+ 					}
+ 				}
+-				ast_str_substitute_variables_full2(&substr2, 0, c, headp,
++				error |= ast_str_substitute_variables_full2(&substr2, 0, c, headp,
+ 					ast_str_buffer(substr1), NULL, use_both);
+ 				finalvars = ast_str_buffer(substr2);
+ 			} else {
+@@ -639,36 +642,39 @@ void ast_str_substitute_variables_full2(struct ast_str **buf, ssize_t maxlen,
+ 	ast_free(substr1);
+ 	ast_free(substr2);
+ 	ast_free(substr3);
++
++    return error;
+ }
+ 
+-void ast_str_substitute_variables_full(struct ast_str **buf, ssize_t maxlen,
++int ast_str_substitute_variables_full(struct ast_str **buf, ssize_t maxlen,
+ 	struct ast_channel *chan, struct varshead *headp, const char *templ, size_t *used)
+ {
+-	ast_str_substitute_variables_full2(buf, maxlen, chan, headp, templ, used, 0);
++	return ast_str_substitute_variables_full2(buf, maxlen, chan, headp, templ, used, 0);
+ }
+ 
+-void ast_str_substitute_variables(struct ast_str **buf, ssize_t maxlen, struct ast_channel *chan, const char *templ)
++int ast_str_substitute_variables(struct ast_str **buf, ssize_t maxlen, struct ast_channel *chan, const char *templ)
+ {
+-	ast_str_substitute_variables_full(buf, maxlen, chan, NULL, templ, NULL);
++	return ast_str_substitute_variables_full(buf, maxlen, chan, NULL, templ, NULL);
+ }
+ 
+-void ast_str_substitute_variables_varshead(struct ast_str **buf, ssize_t maxlen, struct varshead *headp, const char *templ)
++int ast_str_substitute_variables_varshead(struct ast_str **buf, ssize_t maxlen, struct varshead *headp, const char *templ)
+ {
+-	ast_str_substitute_variables_full(buf, maxlen, NULL, headp, templ, NULL);
++	return ast_str_substitute_variables_full(buf, maxlen, NULL, headp, templ, NULL);
+ }
+ 
+-void pbx_substitute_variables_helper_full(struct ast_channel *c, struct varshead *headp, const char *cp1, char *cp2, int count, size_t *used)
++int pbx_substitute_variables_helper_full(struct ast_channel *c, struct varshead *headp, const char *cp1, char *cp2, int count, size_t *used)
+ {
+-	pbx_substitute_variables_helper_full_location(c, headp, cp1, cp2, count, used, NULL, NULL, 0);
++	return pbx_substitute_variables_helper_full_location(c, headp, cp1, cp2, count, used, NULL, NULL, 0);
+ }
+ 
+-void pbx_substitute_variables_helper_full_location(struct ast_channel *c, struct varshead *headp, const char *cp1, char *cp2, int count, size_t *used, const char *context, const char *exten, int pri)
++int pbx_substitute_variables_helper_full_location(struct ast_channel *c, struct varshead *headp, const char *cp1, char *cp2, int count, size_t *used, const char *context, const char *exten, int pri)
+ {
+ 	/* Substitutes variables into cp2, based on string cp1, cp2 NO LONGER NEEDS TO BE ZEROED OUT!!!!  */
+ 	const char *whereweare;
+ 	const char *orig_cp2 = cp2;
+ 	char ltmp[VAR_BUF_SIZE];
+ 	char var[VAR_BUF_SIZE];
++    int error = 0;
+ 
+ 	*cp2 = 0; /* just in case nothing ends up there */
+ 	whereweare = cp1;
+@@ -767,7 +773,7 @@ void pbx_substitute_variables_helper_full_location(struct ast_channel *c, struct
+ 
+ 			/* Substitute if necessary */
+ 			if (needsub) {
+-				pbx_substitute_variables_helper_full_location(c, headp, var, ltmp, VAR_BUF_SIZE - 1, NULL, context, exten, pri);
++				error |= pbx_substitute_variables_helper_full_location(c, headp, var, ltmp, VAR_BUF_SIZE - 1, NULL, context, exten, pri);
+ 				vars = ltmp;
+ 			} else {
+ 				vars = var;
+@@ -776,17 +782,23 @@ void pbx_substitute_variables_helper_full_location(struct ast_channel *c, struct
+ 			parse_variable_name(vars, &offset, &offset2, &isfunction);
+ 			if (isfunction) {
+ 				/* Evaluate function */
+-				if (c || !headp)
+-					cp4 = ast_func_read(c, vars, workspace, VAR_BUF_SIZE) ? NULL : workspace;
+-				else {
++				if (c || !headp) {
++                    int funcerr;
++
++                    error |= (funcerr = ast_func_read(c, vars, workspace, VAR_BUF_SIZE));
++
++                    cp4 = funcerr ? NULL : workspace;
++                } else {
+ 					struct varshead old;
+ 					struct ast_channel *bogus;
+ 
+ 					bogus = ast_dummy_channel_alloc();
+ 					if (bogus) {
++                        int funcerr;
+ 						old = *ast_channel_varshead(bogus);
+ 						*ast_channel_varshead(bogus) = *headp;
+-						cp4 = ast_func_read(bogus, vars, workspace, VAR_BUF_SIZE) ? NULL : workspace;
++                        error |= (funcerr = ast_func_read(bogus, vars, workspace, VAR_BUF_SIZE));
++						cp4 = funcerr ? NULL : workspace;
+ 						/* Don't deallocate the varshead that was passed in */
+ 						*ast_channel_varshead(bogus) = old;
+ 						ast_channel_unref(bogus);
+@@ -863,7 +875,7 @@ void pbx_substitute_variables_helper_full_location(struct ast_channel *c, struct
+ 
+ 			/* Substitute if necessary */
+ 			if (needsub) {
+-				pbx_substitute_variables_helper_full_location(c, headp, var, ltmp, VAR_BUF_SIZE - 1, NULL, context, exten, pri);
++				error |= pbx_substitute_variables_helper_full_location(c, headp, var, ltmp, VAR_BUF_SIZE - 1, NULL, context, exten, pri);
+ 				vars = ltmp;
+ 			} else {
+ 				vars = var;
+@@ -881,16 +893,18 @@ void pbx_substitute_variables_helper_full_location(struct ast_channel *c, struct
+ 	if (used) {
+ 		*used = cp2 - orig_cp2;
+ 	}
++
++    return error;
+ }
+ 
+-void pbx_substitute_variables_helper(struct ast_channel *c, const char *cp1, char *cp2, int count)
++int pbx_substitute_variables_helper(struct ast_channel *c, const char *cp1, char *cp2, int count)
+ {
+-	pbx_substitute_variables_helper_full(c, (c) ? ast_channel_varshead(c) : NULL, cp1, cp2, count, NULL);
++	return pbx_substitute_variables_helper_full(c, (c) ? ast_channel_varshead(c) : NULL, cp1, cp2, count, NULL);
+ }
+ 
+-void pbx_substitute_variables_varshead(struct varshead *headp, const char *cp1, char *cp2, int count)
++int pbx_substitute_variables_varshead(struct varshead *headp, const char *cp1, char *cp2, int count)
+ {
+-	pbx_substitute_variables_helper_full(NULL, headp, cp1, cp2, count, NULL);
++    return pbx_substitute_variables_helper_full(NULL, headp, cp1, cp2, count, NULL);
+ }
+ 
+ /*! \brief CLI support for listing global variables in a parseable way */
+diff --git a/main/sorcery.c b/main/sorcery.c
+index 7f0ed2d..677b7b3 100644
+--- a/main/sorcery.c
++++ b/main/sorcery.c
+@@ -1850,13 +1850,17 @@ static int sorcery_cache_create(void *obj, void *arg, int flags)
+ 	return 0;
+ }
+ 
+-void *ast_sorcery_retrieve_by_id(const struct ast_sorcery *sorcery, const char *type, const char *id)
++void *ast_sorcery_retrieve_by_id2(const struct ast_sorcery *sorcery, const char *type, const char *id, int * const errflag)
+ {
+ 	struct ast_sorcery_object_type *object_type;
+ 	void *object = NULL;
+ 	int i;
+ 	unsigned int cached = 0;
+ 
++    if (errflag) {
++        *errflag = 0;
++    }
++
+ 	if (ast_strlen_zero(id)) {
+ 		return NULL;
+ 	}
+@@ -1871,7 +1875,19 @@ void *ast_sorcery_retrieve_by_id(const struct ast_sorcery *sorcery, const char *
+ 		struct ast_sorcery_object_wizard *wizard =
+ 			AST_VECTOR_GET(&object_type->wizards, i);
+ 
+-		if (wizard->wizard->callbacks.retrieve_id &&
++        if (wizard->wizard->callbacks.retrieve_id2) {
++            int placeholder;
++            int * const error = errflag ? errflag : &placeholder;
++
++            if (!(object = wizard->wizard->callbacks.retrieve_id2(sorcery, wizard->data, object_type->name, id, error))) {
++                if (!*error) {
++                    /* No backend errors cause item not found by this backend */
++                    continue;
++                }
++
++                /* Backend error cause immidiatly stop entity searching at other backends because infrastructure may be unstable. Is it right solution? */
++            }
++        } else if (wizard->wizard->callbacks.retrieve_id &&
+ 			!(object = wizard->wizard->callbacks.retrieve_id(sorcery, wizard->data, object_type->name, id))) {
+ 			continue;
+ 		}
+@@ -1894,13 +1910,22 @@ void *ast_sorcery_retrieve_by_id(const struct ast_sorcery *sorcery, const char *
+ 	return object;
+ }
+ 
+-void *ast_sorcery_retrieve_by_fields(const struct ast_sorcery *sorcery, const char *type, unsigned int flags, struct ast_variable *fields)
++void *ast_sorcery_retrieve_by_id(const struct ast_sorcery *sorcery, const char *type, const char *id)
++{
++    return ast_sorcery_retrieve_by_id2(sorcery, type, id, NULL);
++}
++
++void *ast_sorcery_retrieve_by_fields2(const struct ast_sorcery *sorcery, const char *type, unsigned int flags, struct ast_variable *fields, int * const errflag)
+ {
+ 	RAII_VAR(struct ast_sorcery_object_type *, object_type, ao2_find(sorcery->types, type, OBJ_KEY), ao2_cleanup);
+ 	void *object = NULL;
+ 	int i;
+ 	unsigned int cached = 0;
+ 
++    if (errflag) {
++        *errflag = 0;
++    }
++
+ 	if (!object_type) {
+ 		return NULL;
+ 	}
+@@ -1917,18 +1942,26 @@ void *ast_sorcery_retrieve_by_fields(const struct ast_sorcery *sorcery, const ch
+ 	for (i = 0; i < AST_VECTOR_SIZE(&object_type->wizards); i++) {
+ 		struct ast_sorcery_object_wizard *wizard =
+ 			AST_VECTOR_GET(&object_type->wizards, i);
++        int placeholder;
++        int * const error = errflag ? errflag : &placeholder;
++
++        *error = 0;
+ 
+ 		if ((flags & AST_RETRIEVE_FLAG_MULTIPLE)) {
+-			if (wizard->wizard->callbacks.retrieve_multiple) {
++            if (wizard->wizard->callbacks.retrieve_multiple2) {
++                wizard->wizard->callbacks.retrieve_multiple2(sorcery, wizard->data, object_type->name, object, fields, error);
++            } else if (wizard->wizard->callbacks.retrieve_multiple) {
+ 				wizard->wizard->callbacks.retrieve_multiple(sorcery, wizard->data, object_type->name, object, fields);
+ 			}
+ 		} else if (fields && wizard->wizard->callbacks.retrieve_fields) {
+-			if (wizard->wizard->callbacks.retrieve_fields) {
++            if (wizard->wizard->callbacks.retrieve_fields2) {
++                object = wizard->wizard->callbacks.retrieve_fields2(sorcery, wizard->data, object_type->name, fields, error);
++            } else if (wizard->wizard->callbacks.retrieve_fields) {
+ 				object = wizard->wizard->callbacks.retrieve_fields(sorcery, wizard->data, object_type->name, fields);
+ 			}
+ 		}
+ 
+-		if (((flags & AST_RETRIEVE_FLAG_MULTIPLE) && (!ao2_container_count(object) || !wizard->caching)) || !object) {
++		if ((((flags & AST_RETRIEVE_FLAG_MULTIPLE) && (!ao2_container_count(object) || !wizard->caching)) || !object) && !*error) {
+ 			continue;
+ 		}
+ 
+@@ -1946,12 +1979,21 @@ void *ast_sorcery_retrieve_by_fields(const struct ast_sorcery *sorcery, const ch
+ 	return object;
+ }
+ 
+-struct ao2_container *ast_sorcery_retrieve_by_regex(const struct ast_sorcery *sorcery, const char *type, const char *regex)
++void *ast_sorcery_retrieve_by_fields(const struct ast_sorcery *sorcery, const char *type, unsigned int flags, struct ast_variable *fields)
++{
++    return ast_sorcery_retrieve_by_fields2(sorcery, type, flags, fields, NULL);
++}
++
++struct ao2_container *ast_sorcery_retrieve_by_regex2(const struct ast_sorcery *sorcery, const char *type, const char *regex, int * const errflag)
+ {
+ 	RAII_VAR(struct ast_sorcery_object_type *, object_type, ao2_find(sorcery->types, type, OBJ_KEY), ao2_cleanup);
+ 	struct ao2_container *objects;
+ 	int i;
+ 
++    if (errflag) {
++        *errflag = 0;
++    }
++
+ 	if (!object_type) {
+ 		return NULL;
+ 	}
+@@ -1966,27 +2008,43 @@ struct ao2_container *ast_sorcery_retrieve_by_regex(const struct ast_sorcery *so
+ 		struct ast_sorcery_object_wizard *wizard =
+ 			AST_VECTOR_GET(&object_type->wizards, i);
+ 
+-		if (!wizard->wizard->callbacks.retrieve_regex) {
+-			continue;
+-		}
++        if (wizard->wizard->callbacks.retrieve_regex2) {
++            int placeholder;
++            int * const error = errflag ? errflag : &placeholder;
+ 
+-		wizard->wizard->callbacks.retrieve_regex(sorcery, wizard->data, object_type->name, objects, regex);
++            wizard->wizard->callbacks.retrieve_regex2(sorcery, wizard->data, object_type->name, objects, regex, error);
+ 
+-		if (wizard->caching && ao2_container_count(objects)) {
+-			break;
+-		}
++            if (*error || (wizard->caching && ao2_container_count(objects))) {
++                break;
++            }
++        } else if (wizard->wizard->callbacks.retrieve_regex) {
++            wizard->wizard->callbacks.retrieve_regex(sorcery, wizard->data, object_type->name, objects, regex);
++
++            if (wizard->caching && ao2_container_count(objects)) {
++                break;
++            }
++        }
+ 	}
+ 	AST_VECTOR_RW_UNLOCK(&object_type->wizards);
+ 
+ 	return objects;
+ }
+ 
+-struct ao2_container *ast_sorcery_retrieve_by_prefix(const struct ast_sorcery *sorcery, const char *type, const char *prefix, const size_t prefix_len)
++struct ao2_container *ast_sorcery_retrieve_by_regex(const struct ast_sorcery *sorcery, const char *type, const char *regex)
++{
++    return ast_sorcery_retrieve_by_regex2(sorcery, type, regex, NULL);
++}
++
++struct ao2_container *ast_sorcery_retrieve_by_prefix2(const struct ast_sorcery *sorcery, const char *type, const char *prefix, const size_t prefix_len, int * const errflag)
+ {
+ 	RAII_VAR(struct ast_sorcery_object_type *, object_type, ao2_find(sorcery->types, type, OBJ_KEY), ao2_cleanup);
+ 	struct ao2_container *objects;
+ 	int i;
+ 
++    if (errflag) {
++        *errflag = 0;
++    }
++
+ 	if (!object_type) {
+ 		return NULL;
+ 	}
+@@ -2001,14 +2059,21 @@ struct ao2_container *ast_sorcery_retrieve_by_prefix(const struct ast_sorcery *s
+ 		struct ast_sorcery_object_wizard *wizard =
+ 			AST_VECTOR_GET(&object_type->wizards, i);
+ 
+-		if (!wizard->wizard->callbacks.retrieve_prefix) {
+-			continue;
+-		}
++        if (wizard->wizard->callbacks.retrieve_prefix2) {
++            int placeholder;
++            int * const error = errflag ? errflag : &placeholder;
+ 
+-		wizard->wizard->callbacks.retrieve_prefix(sorcery, wizard->data, object_type->name, objects, prefix, prefix_len);
++            wizard->wizard->callbacks.retrieve_prefix2(sorcery, wizard->data, object_type->name, objects, prefix, prefix_len, error);
+ 
+-		if (wizard->caching && ao2_container_count(objects)) {
+-			break;
++            if (*error || (wizard->caching && ao2_container_count(objects))) {
++                break;
++            }
++        } else if (wizard->wizard->callbacks.retrieve_prefix) {
++            wizard->wizard->callbacks.retrieve_prefix(sorcery, wizard->data, object_type->name, objects, prefix, prefix_len);
++
++            if (wizard->caching && ao2_container_count(objects)) {
++                break;
++            }
+ 		}
+ 	}
+ 	AST_VECTOR_RW_UNLOCK(&object_type->wizards);
+@@ -2016,6 +2081,11 @@ struct ao2_container *ast_sorcery_retrieve_by_prefix(const struct ast_sorcery *s
+ 	return objects;
+ }
+ 
++struct ao2_container *ast_sorcery_retrieve_by_prefix(const struct ast_sorcery *sorcery, const char *type, const char *prefix, const size_t prefix_len)
++{
++    return ast_sorcery_retrieve_by_prefix2(sorcery, type, prefix, prefix_len, NULL);
++}
++
+ /*! \brief Internal function which returns if the wizard has created the object */
+ static int sorcery_wizard_create(const struct ast_sorcery_object_wizard *object_wizard, const struct sorcery_details *details)
+ {
+diff --git a/res/res_config_curl.c b/res/res_config_curl.c
+index a124958..e3bc3d0 100644
+--- a/res/res_config_curl.c
++++ b/res/res_config_curl.c
+@@ -58,7 +58,7 @@ AST_THREADSTORAGE(result_buf);
+  * \retval var on success
+  * \retval NULL on failure
+ */
+-static struct ast_variable *realtime_curl(const char *url, const char *unused, const struct ast_variable *fields)
++static struct ast_variable *realtime_curl2(const char *url, const char *unused, const struct ast_variable *fields, int * const errflag)
+ {
+ 	struct ast_str *query, *buffer;
+ 	char buf1[256], buf2[256];
+@@ -67,17 +67,34 @@ static struct ast_variable *realtime_curl(const char *url, const char *unused, c
+ 	unsigned int start = 1;
+ 	struct ast_variable *var = NULL, *prev = NULL;
+ 
++    if (errflag) {
++        *errflag = 0;
++    }
++
+ 	if (!ast_custom_function_find("CURL")) {
+ 		ast_log(LOG_ERROR, "func_curl.so must be loaded in order to use res_config_curl.so!!\n");
++
++        if (errflag) {
++            *errflag = -1;
++        }
++
+ 		return NULL;
+ 	}
+ 
+ 	if (!(query = ast_str_thread_get(&query_buf, 16))) {
+-		return NULL;
++        if (errflag) {
++            *errflag = -1;
++        }
++
++        return NULL;
+ 	}
+ 
+ 	if (!(buffer = ast_str_thread_get(&result_buf, 16))) {
+-		return NULL;
++        if (errflag) {
++            *errflag = -1;
++        }
++
++        return NULL;
+ 	}
+ 
+ 	ast_str_set(&query, 0, "${CURL(%s/single,", url);
+@@ -90,7 +107,11 @@ static struct ast_variable *realtime_curl(const char *url, const char *unused, c
+ 	}
+ 
+ 	ast_str_append(&query, 0, ")}");
+-	ast_str_substitute_variables(&buffer, 0, NULL, ast_str_buffer(query));
++	if (ast_str_substitute_variables(&buffer, 0, NULL, ast_str_buffer(query))) {
++        if (errflag) {
++            *errflag = -1;
++        }
++    }
+ 
+ 	/* Remove any trailing newline characters */
+ 	if ((stringp = strchr(ast_str_buffer(buffer), '\r')) || (stringp = strchr(ast_str_buffer(buffer), '\n'))) {
+@@ -120,6 +141,11 @@ static struct ast_variable *realtime_curl(const char *url, const char *unused, c
+ 	return var;
+ }
+ 
++static struct ast_variable *realtime_curl(const char *url, const char *unused, const struct ast_variable *fields)
++{
++    return realtime_curl2(url, unused, fields, NULL);
++}
++
+ /*!
+  * \brief Execute an Select query and return ast_config list
+  * \param url
+@@ -592,6 +618,7 @@ static struct ast_config *config_curl(const char *url, const char *unused, const
+ static struct ast_config_engine curl_engine = {
+ 	.name = "curl",
+ 	.load_func = config_curl,
++    .realtime_func2 = realtime_curl2,
+ 	.realtime_func = realtime_curl,
+ 	.realtime_multi_func = realtime_multi_curl,
+ 	.store_func = store_curl,
+diff --git a/res/res_prometheus.c b/res/res_prometheus.c
+index 9e46181..a8b36b4 100644
+--- a/res/res_prometheus.c
++++ b/res/res_prometheus.c
+@@ -129,6 +129,8 @@
+ #include "asterisk/config_options.h"
+ #include "asterisk/ast_version.h"
+ #include "asterisk/buildinfo.h"
++
++#define AST_API_MODULE
+ #include "asterisk/res_prometheus.h"
+ 
+ #include "prometheus/prometheus_internal.h"
+@@ -136,6 +138,9 @@
+ /*! \brief Lock that protects data structures during an HTTP scrape */
+ AST_MUTEX_DEFINE_STATIC(scrape_lock);
+ 
++/*! \brief Indicate module ready to accept optional API calls who can change global state */
++static int module_ready = 0;
++
+ AST_VECTOR(, struct prometheus_metric *) metrics;
+ 
+ AST_VECTOR(, struct prometheus_callback *) callbacks;
+@@ -285,7 +290,7 @@ int prometheus_metric_registered_count(void)
+ 	return AST_VECTOR_SIZE(&metrics);
+ }
+ 
+-int prometheus_metric_register(struct prometheus_metric *metric)
++int AST_OPTIONAL_API_NAME(prometheus_metric_register)(struct prometheus_metric *metric)
+ {
+ 	SCOPED_MUTEX(lock, &scrape_lock);
+ 	int i;
+@@ -294,6 +299,11 @@ int prometheus_metric_register(struct prometheus_metric *metric)
+ 		return -1;
+ 	}
+ 
++    if (!module_ready) {
++        /* API still unavailable */
++        return AST_OPTIONAL_API_UNAVAILABLE;
++    }
++
+ 	for (i = 0; i < AST_VECTOR_SIZE(&metrics); i++) {
+ 		struct prometheus_metric *existing = AST_VECTOR_GET(&metrics, i);
+ 		struct prometheus_metric *child;
+@@ -332,13 +342,13 @@ int prometheus_metric_register(struct prometheus_metric *metric)
+ 	return 0;
+ }
+ 
+-int prometheus_metric_unregister(struct prometheus_metric *metric)
++int AST_OPTIONAL_API_NAME(prometheus_metric_unregister)(struct prometheus_metric *metric)
+ {
+ 	if (!metric) {
+ 		return -1;
+ 	}
+ 
+-	{
++	if (module_ready) {
+ 		SCOPED_MUTEX(lock, &scrape_lock);
+ 		int i;
+ 
+@@ -385,29 +395,43 @@ int prometheus_metric_unregister(struct prometheus_metric *metric)
+ 				AST_LIST_TRAVERSE_SAFE_END;
+ 			}
+ 		}
+-	}
++	} else {
++        return AST_OPTIONAL_API_UNAVAILABLE;
++    }
+ 
+ 	return -1;
+ }
+ 
+-void prometheus_metric_free(struct prometheus_metric *metric)
++int AST_OPTIONAL_API_NAME(prometheus_metric_free)(struct prometheus_metric *metric)
+ {
+ 	struct prometheus_metric *child;
++    int preserve;
+ 
+ 	if (!metric) {
+-		return;
++		return 0;
+ 	}
+ 
+ 	while ((child = AST_LIST_REMOVE_HEAD(&metric->children, entry))) {
+ 		prometheus_metric_free(child);
+ 	}
++
++    ast_mutex_lock(&metric->lock);
++    preserve = metric->on_destroy ? metric->on_destroy(metric) : 0;
++    ast_mutex_unlock(&metric->lock);
++
++    if (preserve) {
++        return preserve;
++    }
++
+ 	ast_mutex_destroy(&metric->lock);
+ 
+ 	if (metric->allocation_strategy == PROMETHEUS_METRIC_ALLOCD) {
+-		return;
++		return 0;
+ 	} else if (metric->allocation_strategy == PROMETHEUS_METRIC_MALLOCD) {
+ 		ast_free(metric);
+ 	}
++
++    return 0;
+ }
+ 
+ /*!
+@@ -508,6 +532,11 @@ static void prometheus_metric_full_to_string(struct prometheus_metric *metric,
+ 		ast_str_append(output, 0, "%s", "}");
+ 	}
+ 
++    /* If specified value fetcher call it before use metric value */
++    if (metric->get_metric_value) {
++        metric->get_metric_value(metric);
++    }
++
+ 	/*
+ 	 * If no value exists, put in a 0. That ensures we don't anger Prometheus.
+ 	 */
+@@ -582,9 +611,6 @@ static void scrape_metrics(struct ast_str **response)
+ 		}
+ 
+ 		ast_mutex_lock(&metric->lock);
+-		if (metric->get_metric_value) {
+-			metric->get_metric_value(metric);
+-		}
+ 		prometheus_metric_to_string(metric, response);
+ 		ast_mutex_unlock(&metric->lock);
+ 	}
+@@ -904,6 +930,9 @@ static int unload_module(void)
+ 	aco_info_destroy(&cfg_info);
+ 	ao2_global_obj_release(global_config);
+ 
++    /* After this point we reject optional api calls, who can change global module state */
++    module_ready = 0;
++
+ 	return 0;
+ }
+ 
+@@ -967,6 +996,10 @@ static int load_module(void)
+ 	aco_option_register(&cfg_info, "auth_username", ACO_EXACT, global_options, "", OPT_STRINGFIELD_T, 0, STRFLDSET(struct prometheus_general_config, auth_username));
+ 	aco_option_register(&cfg_info, "auth_password", ACO_EXACT, global_options, "", OPT_STRINGFIELD_T, 0, STRFLDSET(struct prometheus_general_config, auth_password));
+ 	aco_option_register(&cfg_info, "auth_realm", ACO_EXACT, global_options, "Asterisk Prometheus Metrics", OPT_STRINGFIELD_T, 0, STRFLDSET(struct prometheus_general_config, auth_realm));
++
++    /* At this time safe to accept optional api calls */
++    module_ready = 1;
++
+ 	if (aco_process_config(&cfg_info, 0) == ACO_PROCESS_ERROR) {
+ 		goto cleanup;
+ 	}
+diff --git a/res/res_sorcery_memory_cache.c b/res/res_sorcery_memory_cache.c
+index 6e09dfd..7bb676a 100644
+--- a/res/res_sorcery_memory_cache.c
++++ b/res/res_sorcery_memory_cache.c
+@@ -990,18 +990,29 @@ static int stale_item_update(const void *data)
+ {
+ 	struct stale_update_task_data *task_data = (struct stale_update_task_data *) data;
+ 	void *object;
++    int errflag;
+ 
+ 	start_passthru_update();
+ 
+-	object = ast_sorcery_retrieve_by_id(task_data->sorcery,
++	object = ast_sorcery_retrieve_by_id2(task_data->sorcery,
+ 		ast_sorcery_object_get_type(task_data->object),
+-		ast_sorcery_object_get_id(task_data->object));
+-	if (!object) {
+-		ast_debug(1, "Backend no longer has object type '%s' ID '%s'. Removing from cache\n",
+-			ast_sorcery_object_get_type(task_data->object),
+-			ast_sorcery_object_get_id(task_data->object));
+-		sorcery_memory_cache_delete(task_data->sorcery, task_data->cache,
+-			task_data->object);
++		ast_sorcery_object_get_id(task_data->object),
++        &errflag);
++
++    if (!object && errflag) {
++        ao2_ref(object = task_data->object, +1);
++
++        ast_debug(1, "Backend failure when attempt to fetch object type '%s' ID '%s'. Extend the lifetime of an object\n",
++                  ast_sorcery_object_get_type(object),
++                  ast_sorcery_object_get_id(object));
++    }
++
++    if (!object) {
++        ast_debug(1, "Backend no longer has object type '%s' ID '%s'. Removing from cache\n",
++                  ast_sorcery_object_get_type(task_data->object),
++                  ast_sorcery_object_get_id(task_data->object));
++        sorcery_memory_cache_delete(task_data->sorcery, task_data->cache,
++                                    task_data->object);
+ 	} else {
+ 		ast_debug(1, "Refreshing stale cache object type '%s' ID '%s'\n",
+ 			ast_sorcery_object_get_type(task_data->object),
+diff --git a/res/res_sorcery_realtime.c b/res/res_sorcery_realtime.c
+index 31ba2f5..5fdaea3 100644
+--- a/res/res_sorcery_realtime.c
++++ b/res/res_sorcery_realtime.c
+@@ -34,10 +34,34 @@
+ 
+ #include "asterisk/module.h"
+ #include "asterisk/sorcery.h"
++#include "asterisk/utils.h"
++#include "asterisk/lock.h"
++#include "asterisk/res_prometheus.h"
+ 
+ /*! \brief They key field used to store the unique identifier for the object */
+ #define UUID_FIELD "id"
+ 
++#define METRIC_REQUEST_TOTAL_INDEX  (0)
++#define METRIC_REQUEST_TOTAL_FLAG   (1 << METRIC_REQUEST_TOTAL_INDEX)
++#define METRIC_REQUEST_TOTAL_NAME   "asterisk_realtime_request_total"
++#define METRIC_REQUEST_TOTAL_HELP   "Total requests on sorcery realtime subsystem"
++
++#define METRIC_REQUEST_ERROR_INDEX  (METRIC_REQUEST_TOTAL_INDEX + 1)
++#define METRIC_REQUEST_ERROR_FLAG   (1 << METRIC_REQUEST_ERROR_INDEX)
++#define METRIC_REQUEST_ERROR_NAME   "asterisk_realtime_request_error"
++#define METRIC_REQUEST_ERROR_HELP   "Total error requests on sorcery realtime subsystem"
++
++#define METRIC_REQUEST_MISS_INDEX   (METRIC_REQUEST_ERROR_INDEX + 1)
++#define METRIC_REQUEST_MISS_FLAG    (1 << METRIC_REQUEST_MISS_INDEX)
++#define METRIC_REQUEST_MISS_NAME    "asterisk_realtime_request_miss"
++#define METRIC_REQUEST_MISS_HELP    "Total miss requests on sorcery realtime subsystem"
++
++#define METRICS_COUNT               (METRIC_REQUEST_MISS_INDEX + 1)
++
++#define container_of(ptr, type, member) ({                      \
++        const typeof( ((type *)0)->member ) *__mptr = (ptr);    \
++        (type *)( (char *)__mptr - offsetof(type,member) );})
++
+ enum unqualified_fetch {
+ 	UNQUALIFIED_FETCH_NO,
+ 	UNQUALIFIED_FETCH_WARN,
+@@ -47,30 +71,52 @@ enum unqualified_fetch {
+ 
+ struct sorcery_config {
+ 	enum unqualified_fetch fetch;
++    struct prometheus_metric metrics[METRICS_COUNT];
++    uint64_t metric_values[METRICS_COUNT];
+ 	char family[];
+ };
+ 
+ static void *sorcery_realtime_open(const char *data);
+ static int sorcery_realtime_create(const struct ast_sorcery *sorcery, void *data, void *object);
++static void *sorcery_realtime_retrieve_id2(const struct ast_sorcery *sorcery, void *data, const char *type, const char *id, int * const errflag);
+ static void *sorcery_realtime_retrieve_id(const struct ast_sorcery *sorcery, void *data, const char *type, const char *id);
++static void *sorcery_realtime_retrieve_fields2(const struct ast_sorcery *sorcery, void *data, const char *type, const struct ast_variable *fields, int * const errflag);
+ static void *sorcery_realtime_retrieve_fields(const struct ast_sorcery *sorcery, void *data, const char *type, const struct ast_variable *fields);
++static void sorcery_realtime_retrieve_multiple2(const struct ast_sorcery *sorcery, void *data, const char *type, struct ao2_container *objects,
++                                               const struct ast_variable *fields, int * const errflag);
+ static void sorcery_realtime_retrieve_multiple(const struct ast_sorcery *sorcery, void *data, const char *type, struct ao2_container *objects,
+ 					     const struct ast_variable *fields);
++static void sorcery_realtime_retrieve_regex2(const struct ast_sorcery *sorcery, void *data, const char *type, struct ao2_container *objects, const char *regex, int * const errflag);
+ static void sorcery_realtime_retrieve_regex(const struct ast_sorcery *sorcery, void *data, const char *type, struct ao2_container *objects, const char *regex);
++static void sorcery_realtime_retrieve_prefix2(const struct ast_sorcery *sorcery, void *data, const char *type,
++                                             struct ao2_container *objects, const char *prefix, const size_t prefix_len, int * const errflag);
+ static void sorcery_realtime_retrieve_prefix(const struct ast_sorcery *sorcery, void *data, const char *type,
+ 					     struct ao2_container *objects, const char *prefix, const size_t prefix_len);
+ static int sorcery_realtime_update(const struct ast_sorcery *sorcery, void *data, void *object);
+ static int sorcery_realtime_delete(const struct ast_sorcery *sorcery, void *data, void *object);
+ static void sorcery_realtime_close(void *data);
+ 
++static void sorcery_realtime_update_metrics(struct sorcery_config * const config, struct ast_flags * const flags);
++static void sorcery_realtime_update_metric(struct sorcery_config * const config, int metric_index, uint64_t metric_delta);
++static void sorcery_realtime_get_metric_value_total(struct prometheus_metric *metric);
++static void sorcery_realtime_get_metric_value_error(struct prometheus_metric *metric);
++static void sorcery_realtime_get_metric_value_miss(struct prometheus_metric *metric);
++static void sorcery_realtime_get_metric_value(struct prometheus_metric *metric, int metric_index);
++static int sorcery_realtime_on_destroy(struct prometheus_metric *metric);
++
+ static struct ast_sorcery_wizard realtime_object_wizard = {
+ 	.name = "realtime",
+ 	.open = sorcery_realtime_open,
+ 	.create = sorcery_realtime_create,
+-	.retrieve_id = sorcery_realtime_retrieve_id,
++	.retrieve_id2 = sorcery_realtime_retrieve_id2,
++    .retrieve_id = sorcery_realtime_retrieve_id,
++    .retrieve_fields2 = sorcery_realtime_retrieve_fields2,
+ 	.retrieve_fields = sorcery_realtime_retrieve_fields,
++    .retrieve_multiple2 = sorcery_realtime_retrieve_multiple2,
+ 	.retrieve_multiple = sorcery_realtime_retrieve_multiple,
++    .retrieve_regex2 = sorcery_realtime_retrieve_regex2,
+ 	.retrieve_regex = sorcery_realtime_retrieve_regex,
++    .retrieve_prefix2 = sorcery_realtime_retrieve_prefix2,
+ 	.retrieve_prefix = sorcery_realtime_retrieve_prefix,
+ 	.update = sorcery_realtime_update,
+ 	.delete = sorcery_realtime_delete,
+@@ -160,14 +206,23 @@ static struct ast_variable *sorcery_realtime_filter_objectset(struct ast_variabl
+ 	return objectset;
+ }
+ 
+-static void *sorcery_realtime_retrieve_fields(const struct ast_sorcery *sorcery, void *data, const char *type, const struct ast_variable *fields)
++static void *sorcery_realtime_retrieve_fields2(const struct ast_sorcery *sorcery, void *data, const char *type, const struct ast_variable *fields, int * const errflag)
+ {
+ 	struct sorcery_config *config = data;
+ 	RAII_VAR(struct ast_variable *, objectset, NULL, ast_variables_destroy);
+ 	RAII_VAR(struct ast_variable *, id, NULL, ast_variables_destroy);
+ 	void *object = NULL;
++    int placeholder;
++    int * const error = errflag ? errflag : &placeholder;
++    struct ast_flags flags = { METRIC_REQUEST_TOTAL_FLAG };
++
++    *error = 0;
++
++	if (!(objectset = ast_load_realtime_fields2(config->family, fields, error))) {
++        /* Error occurred or object not found - update metric */
++        ast_set_flag(&flags, METRIC_REQUEST_MISS_FLAG | (*error ? METRIC_REQUEST_ERROR_FLAG : 0));
++        sorcery_realtime_update_metrics(config, &flags);
+ 
+-	if (!(objectset = ast_load_realtime_fields(config->family, fields))) {
+ 		return NULL;
+ 	}
+ 
+@@ -177,26 +232,63 @@ static void *sorcery_realtime_retrieve_fields(const struct ast_sorcery *sorcery,
+ 		|| !(object = ast_sorcery_alloc(sorcery, type, id->value))
+ 		|| ast_sorcery_objectset_apply(sorcery, object, objectset)) {
+ 		ao2_cleanup(object);
++
++        /* Required object not found, update metric */
++        ast_set_flag(&flags, METRIC_REQUEST_MISS_FLAG);
++        sorcery_realtime_update_metrics(config, &flags);
+ 		return NULL;
+ 	}
+ 
++    /* Object found, update metric */
++    sorcery_realtime_update_metrics(config, &flags);
++
+ 	return object;
+ }
+ 
+-static void *sorcery_realtime_retrieve_id(const struct ast_sorcery *sorcery, void *data, const char *type, const char *id)
++static void *sorcery_realtime_retrieve_fields(const struct ast_sorcery *sorcery, void *data, const char *type, const struct ast_variable *fields)
++{
++    return sorcery_realtime_retrieve_fields2(sorcery, data, type, fields, NULL);
++}
++
++static void *sorcery_realtime_retrieve_id2(const struct ast_sorcery *sorcery, void *data, const char *type, const char *id, int * const errflag)
+ {
+-	RAII_VAR(struct ast_variable *, fields, ast_variable_new(UUID_FIELD, id, ""), ast_variables_destroy);
++    struct sorcery_config *config = data;
++    struct ast_flags flags = { METRIC_REQUEST_TOTAL_FLAG };
++    int placeholder;
++    int * const error = errflag ? errflag : &placeholder;
++    RAII_VAR(struct ast_variable *, fields, ast_variable_new(UUID_FIELD, id, ""), ast_variables_destroy);
++    void *object;
++
++    *error = 0;
++
++    if (!(object = sorcery_realtime_retrieve_fields2(sorcery, data, type, fields, error))) {
++        /* Error occurred or object not found - update metric */
++        ast_set_flag(&flags, METRIC_REQUEST_MISS_FLAG | (*error ? METRIC_REQUEST_ERROR_FLAG : 0));
++    }
+ 
+-	return sorcery_realtime_retrieve_fields(sorcery, data, type, fields);
++    /* Time to update metric */
++    sorcery_realtime_update_metrics(config, &flags);
++
++    return object;
+ }
+ 
+-static void sorcery_realtime_retrieve_multiple(const struct ast_sorcery *sorcery, void *data, const char *type, struct ao2_container *objects, const struct ast_variable *fields)
++static void *sorcery_realtime_retrieve_id(const struct ast_sorcery *sorcery, void *data, const char *type, const char *id)
++{
++    return sorcery_realtime_retrieve_id2(sorcery, data, type, id, NULL);
++}
++
++static void sorcery_realtime_retrieve_multiple2(const struct ast_sorcery *sorcery, void *data, const char *type, struct ao2_container *objects, const struct ast_variable *fields, int * const errflag)
+ {
+ 	struct sorcery_config *config = data;
++    struct ast_flags flags = { METRIC_REQUEST_TOTAL_FLAG|METRIC_REQUEST_MISS_FLAG };
++    int placeholder;
++    int * const error = errflag ? errflag : &placeholder;
+ 	RAII_VAR(struct ast_config *, rows, NULL, ast_config_destroy);
+ 	RAII_VAR(struct ast_variable *, all, NULL, ast_variables_destroy);
+ 	struct ast_category *row = NULL;
+ 
++    *error = 0;
++
+ 	if (!fields) {
+ 		char field[strlen(UUID_FIELD) + 6], value[2];
+ 
+@@ -222,7 +314,11 @@ static void sorcery_realtime_retrieve_multiple(const struct ast_sorcery *sorcery
+ 		fields = all;
+ 	}
+ 
+-	if (!(rows = ast_load_realtime_multientry_fields(config->family, fields))) {
++	if (!(rows = ast_load_realtime_multientry_fields2(config->family, fields, error))) {
++        /* Error occurred or object not found - update metric */
++        ast_set_flag(&flags, METRIC_REQUEST_MISS_FLAG | (*error ? METRIC_REQUEST_ERROR_FLAG : 0));
++        sorcery_realtime_update_metrics(config, &flags);
++
+ 		return;
+ 	}
+ 
+@@ -237,17 +333,34 @@ static void sorcery_realtime_retrieve_multiple(const struct ast_sorcery *sorcery
+ 			&& (object = ast_sorcery_alloc(sorcery, type, id->value))
+ 			&& !ast_sorcery_objectset_apply(sorcery, object, objectset)) {
+ 			ao2_link(objects, object);
++
++            /* Clear MISS flag because some object(s) found */
++            ast_clear_flag(&flags, METRIC_REQUEST_MISS_FLAG);
+ 		}
+ 
+ 		ast_variables_destroy(objectset);
+ 	}
++
++    /* Update metrics*/
++    sorcery_realtime_update_metrics(config, &flags);
+ }
+ 
+-static void sorcery_realtime_retrieve_regex(const struct ast_sorcery *sorcery, void *data, const char *type, struct ao2_container *objects, const char *regex)
++static void sorcery_realtime_retrieve_multiple(const struct ast_sorcery *sorcery, void *data, const char *type, struct ao2_container *objects, const struct ast_variable *fields)
+ {
++    sorcery_realtime_retrieve_multiple2(sorcery, data, type, objects, fields, NULL);
++}
++
++static void sorcery_realtime_retrieve_regex2(const struct ast_sorcery *sorcery, void *data, const char *type, struct ao2_container *objects, const char *regex, int * const errflag)
++{
++    struct sorcery_config *config = data;
++    struct ast_flags flags = { METRIC_REQUEST_TOTAL_FLAG };
++    int placeholder;
++    int * const error = errflag ? errflag : &placeholder;
+ 	char field[strlen(UUID_FIELD) + 6], value[strlen(regex) + 3];
+ 	RAII_VAR(struct ast_variable *, fields, NULL, ast_variables_destroy);
+ 
++    *error = 0;
++
+ 	if (!ast_strlen_zero(regex)) {
+ 		/* The realtime API provides no direct ability to do regex so for now we support a limited subset using pattern matching */
+ 		snprintf(field, sizeof(field), "%s LIKE", UUID_FIELD);
+@@ -262,16 +375,33 @@ static void sorcery_realtime_retrieve_regex(const struct ast_sorcery *sorcery, v
+ 		}
+ 	}
+ 
+-	sorcery_realtime_retrieve_multiple(sorcery, data, type, objects, fields);
++	sorcery_realtime_retrieve_multiple2(sorcery, data, type, objects, fields, error);
++
++    if (*error) {
++        ast_set_flag(&flags, METRIC_REQUEST_ERROR_FLAG | METRIC_REQUEST_MISS_FLAG);
++    }
++
++    sorcery_realtime_update_metrics(config, &flags);
+ }
+ 
+-static void sorcery_realtime_retrieve_prefix(const struct ast_sorcery *sorcery, void *data, const char *type,
+-					     struct ao2_container *objects, const char *prefix, const size_t prefix_len)
++static void sorcery_realtime_retrieve_regex(const struct ast_sorcery *sorcery, void *data, const char *type, struct ao2_container *objects, const char *regex)
+ {
++    return sorcery_realtime_retrieve_regex2(sorcery, data, type, objects, regex, NULL);
++}
++
++static void sorcery_realtime_retrieve_prefix2(const struct ast_sorcery *sorcery, void *data, const char *type,
++					     struct ao2_container *objects, const char *prefix, const size_t prefix_len, int * const errflag)
++{
++    struct sorcery_config *config = data;
++    struct ast_flags flags = { METRIC_REQUEST_TOTAL_FLAG };
++    int placeholder;
++    int * const error = errflag ? errflag : &placeholder;
+ 	char field[strlen(UUID_FIELD) + 6], value[prefix_len + 2];
+ 	RAII_VAR(struct ast_variable *, fields, NULL, ast_variables_destroy);
+ 
+-	if (prefix_len) {
++    *error = 0;
++
++    if (prefix_len) {
+ 		snprintf(field, sizeof(field), "%s LIKE", UUID_FIELD);
+ 		snprintf(value, sizeof(value), "%.*s%%", (int) prefix_len, prefix);
+ 		if (!(fields = ast_variable_new(field, value, ""))) {
+@@ -279,7 +409,19 @@ static void sorcery_realtime_retrieve_prefix(const struct ast_sorcery *sorcery,
+ 		}
+ 	}
+ 
+-	sorcery_realtime_retrieve_multiple(sorcery, data, type, objects, fields);
++	sorcery_realtime_retrieve_multiple2(sorcery, data, type, objects, fields, error);
++
++    if (*error) {
++        ast_set_flag(&flags, METRIC_REQUEST_ERROR_FLAG | METRIC_REQUEST_MISS_FLAG);
++    }
++
++    sorcery_realtime_update_metrics(config, &flags);
++}
++
++static void sorcery_realtime_retrieve_prefix(const struct ast_sorcery *sorcery, void *data, const char *type,
++                                             struct ao2_container *objects, const char *prefix, const size_t prefix_len)
++{
++    return sorcery_realtime_retrieve_prefix2(sorcery, data, type, objects, prefix, prefix_len, NULL);
+ }
+ 
+ static int sorcery_realtime_update(const struct ast_sorcery *sorcery, void *data, void *object)
+@@ -301,12 +443,104 @@ static int sorcery_realtime_delete(const struct ast_sorcery *sorcery, void *data
+ 	return (ast_destroy_realtime_fields(config->family, UUID_FIELD, ast_sorcery_object_get_id(object), NULL) <= 0) ? -1 : 0;
+ }
+ 
++static void sorcery_realtime_update_metrics(struct sorcery_config * const config, struct ast_flags * const flags)
++{
++    if (ast_test_flag(flags, METRIC_REQUEST_TOTAL_FLAG)) {
++        sorcery_realtime_update_metric(config, METRIC_REQUEST_TOTAL_INDEX, 1);
++    }
++
++    if (ast_test_flag(flags, METRIC_REQUEST_ERROR_FLAG)) {
++        sorcery_realtime_update_metric(config, METRIC_REQUEST_ERROR_INDEX, 1);
++    }
++
++    if (ast_test_flag(flags, METRIC_REQUEST_MISS_FLAG)) {
++        sorcery_realtime_update_metric(config, METRIC_REQUEST_MISS_INDEX, 1);
++    }
++}
++
++static void sorcery_realtime_update_metric(struct sorcery_config * const config, int metric_index, uint64_t metric_delta)
++{
++    struct prometheus_metric * const metric = &config->metrics[metric_index];
++
++    ast_mutex_lock(&metric->lock);
++
++    config->metric_values[metric_index] += metric_delta;
++
++    if (NULL == metric->get_metric_value) {
++        /* Metric not registered yet*/
++        metric->on_destroy = sorcery_realtime_on_destroy;
++
++        switch (metric_index) {
++            case METRIC_REQUEST_TOTAL_INDEX:
++                metric->get_metric_value = sorcery_realtime_get_metric_value_total;
++                break;
++            case METRIC_REQUEST_ERROR_INDEX:
++                metric->get_metric_value = sorcery_realtime_get_metric_value_error;
++                break;
++            case METRIC_REQUEST_MISS_INDEX:
++                metric->get_metric_value = sorcery_realtime_get_metric_value_miss;
++                break;
++            default:
++                DO_CRASH_NORETURN;
++        }
++
++        ast_mutex_unlock(&metric->lock);
++
++        if (prometheus_metric_register(metric)) {
++            /* Metric still not registered */
++            ast_mutex_lock(&metric->lock);
++            metric->get_metric_value = NULL;
++            metric->on_destroy = NULL;
++            ast_mutex_unlock(&metric->lock);
++        }
++    } else {
++        /* Metric already registered */
++        ast_mutex_unlock(&metric->lock);
++    }
++}
++
++static void sorcery_realtime_get_metric_value_total(struct prometheus_metric *metric)
++{
++    sorcery_realtime_get_metric_value(metric, METRIC_REQUEST_TOTAL_INDEX);
++}
++
++static void sorcery_realtime_get_metric_value_error(struct prometheus_metric *metric)
++{
++    sorcery_realtime_get_metric_value(metric, METRIC_REQUEST_ERROR_INDEX);
++}
++
++static void sorcery_realtime_get_metric_value_miss(struct prometheus_metric *metric)
++{
++    sorcery_realtime_get_metric_value(metric, METRIC_REQUEST_MISS_INDEX);
++}
++
++static void sorcery_realtime_get_metric_value(struct prometheus_metric *metric, int metric_index)
++{
++    struct sorcery_config * const config = container_of(metric, struct sorcery_config, metrics[metric_index]);
++
++    snprintf(metric->value,
++             sizeof(metric->value),
++             "%" PRIu64,
++            config->metric_values[metric_index]);
++}
++
++static int sorcery_realtime_on_destroy(struct prometheus_metric *metric)
++{
++    metric->get_metric_value = NULL;
++    metric->on_destroy = NULL;
++
++    /* Don't destroy metric by res_prometheus module */
++    return -2;
++}
++
+ static void *sorcery_realtime_open(const char *data)
+ {
+ 	struct sorcery_config *config;
+ 	char *tmp;
+ 	char *family;
+ 	char *option;
++    char eid_str[32];
++    int i;
+ 
+ 	/* We require a prefix for family string generation, or else stuff could mix together */
+ 	if (ast_strlen_zero(data)) {
+@@ -351,11 +585,59 @@ static void *sorcery_realtime_open(const char *data)
+ 		}
+ 	}
+ 
++    ast_eid_to_str(eid_str, sizeof(eid_str), &ast_eid_default);
++
++    for (i = 0;i < ARRAY_LEN(config->metrics);i++) {
++        struct prometheus_metric *metric = &config->metrics[i];
++
++        metric->allocation_strategy = PROMETHEUS_METRIC_ALLOCD;
++        ast_mutex_init(&metric->lock);
++
++        switch (i) {
++        case METRIC_REQUEST_TOTAL_INDEX:
++            metric->type = PROMETHEUS_METRIC_COUNTER;
++            ast_copy_string(metric->name, METRIC_REQUEST_TOTAL_NAME, sizeof(metric->name));
++            metric->help = METRIC_REQUEST_TOTAL_HELP;
++            break;
++        case METRIC_REQUEST_ERROR_INDEX:
++            metric->type = PROMETHEUS_METRIC_COUNTER;
++            ast_copy_string(metric->name, METRIC_REQUEST_ERROR_NAME, sizeof(metric->name));
++            metric->help = METRIC_REQUEST_ERROR_HELP;
++            break;
++        case METRIC_REQUEST_MISS_INDEX:
++            metric->type = PROMETHEUS_METRIC_COUNTER;
++            ast_copy_string(metric->name, METRIC_REQUEST_MISS_NAME, sizeof(metric->name));
++            metric->help = METRIC_REQUEST_MISS_HELP;
++            break;
++        default:
++            DO_CRASH_NORETURN;
++        }
++
++        PROMETHEUS_METRIC_SET_LABEL(metric, 0, "eid", eid_str);
++        PROMETHEUS_METRIC_SET_LABEL(metric, 1, "family", family);
++
++        /* Attempt to initialize and register metric.
++         * Note: this call can be successful only if module res_prometheus already loaded. */
++        sorcery_realtime_update_metric(config, i, 0);
++    }
++
+ 	return config;
+ }
+ 
+ static void sorcery_realtime_close(void *data)
+ {
++    struct sorcery_config *config = data;
++    int i;
++
++    for (i = 0;i < ARRAY_LEN(config->metrics);i++) {
++        struct prometheus_metric *metric = &config->metrics[i];
++
++        if (prometheus_metric_unregister(metric)) {
++            /* May be metric not registered yet, simple destroy it */
++            prometheus_metric_free(metric);
++        }
++    }
++
+ 	ast_free(data);
+ }
+ 
